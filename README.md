@@ -31,8 +31,3 @@ We propose a multimodal sentiment classification system that leverages **utteran
 | Audio (Intensity)       | Audio    | ~69%     | ~68%        | Evaluates emotional intensity                  |
 | Early Fusion (MLP)      | Fusion   | ~45.5%   | ~30%        | Early fusion using a multilayer perceptron     |
 | Early Fusion (Attention)| Fusion   | ~66.5%   | ~64%        | Early fusion using an attention mechanism      |
-
-*See the paper/report for complete metrics and visualizations.*
-
-## 📁 Folder Structure
-
