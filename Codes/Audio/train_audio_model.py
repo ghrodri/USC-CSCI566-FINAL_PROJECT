@@ -1,101 +1,122 @@
-# Train an audio emotion classifier using CNN and extracted features (MFCC, pitch, energy)
-
 import os
-import torch
-import torch.nn as nn
-import torchaudio
-from torch.utils.data import Dataset, DataLoader
+import numpy as np
+import librosa
+import soundfile as sf
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.decomposition import PCA
+from sklearn.preprocessing import StandardScaler, LabelEncoder
 from sklearn.model_selection import train_test_split
-from tqdm import tqdm
+from sklearn.neural_network import MLPClassifier
+from sklearn.metrics import classification_report, confusion_matrix
+import pandas as pd
+import torch
 
-SAMPLE_RATE = 16000
-NUM_MFCC = 40
-BATCH_SIZE = 16
-EPOCHS = 10
-LR = 0.001
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# Define paths and mappings
+AUDIO_PATH = "/home1/ggrimald/CSCI-566-FINAL_PROJECT/Data/Audio/Audio_data"
+MODEL_SAVE_PATH = "/home1/ggrimald/CSCI-566-FINAL_PROJECT/models"
+os.makedirs(MODEL_SAVE_PATH, exist_ok=True)
 
-LABELS = {
-    '01': 'neutral', '02': 'calm', '03': 'happy', '04': 'sad',
-    '05': 'angry', '06': 'fearful', '07': 'disgust', '08': 'surprised'
+emotion_mapping = {
+    "01": "Neutral", "02": "Calm", "03": "Happy", "04": "Sad",
+    "05": "Angry", "06": "Fearful", "07": "Disgust", "08": "Surprised"
 }
 
-class AudioFeatureDataset(Dataset):
-    def __init__(self, filepaths, labels):
-        self.filepaths = filepaths
-        self.labels = labels
-        self.mfcc = torchaudio.transforms.MFCC(sample_rate=SAMPLE_RATE, n_mfcc=NUM_MFCC)
+emotion_category = {
+    "Neutral": "Neutral", "Calm": "Positive", "Happy": "Positive",
+    "Sad": "Negative", "Angry": "Negative", "Fearful": "Negative",
+    "Disgust": "Negative", "Surprised": "Positive"
+}
 
-    def __len__(self):
-        return len(self.filepaths)
+intensity_mapping = {"01": "Normal", "02": "Strong"}
 
-    def extract_features(self, waveform, sr):
-        if sr != SAMPLE_RATE:
-            waveform = torchaudio.functional.resample(waveform, sr, SAMPLE_RATE)
-        mfcc = self.mfcc(waveform).squeeze(0)[:, :200]
-        if mfcc.shape[1] < 200:
-            mfcc = nn.functional.pad(mfcc, (0, 200 - mfcc.shape[1]))
-        pitch, _ = torchaudio.functional.detect_pitch_frequency(waveform, SAMPLE_RATE)
-        pitch = pitch[:200]
-        if pitch.shape[0] < 200:
-            pitch = nn.functional.pad(pitch, (0, 200 - pitch.shape[0]))
-        energy = waveform.pow(2).mean(dim=1).repeat(200)
-        return torch.stack([mfcc.mean(dim=0), pitch, energy], dim=0)
+def extract_features(file_path, max_pad_length=50000):
+    try:
+        y, sr = librosa.load(file_path, sr=48000)
+        if len(y) == 0 or np.all(np.abs(y) < 1e-5) or np.sum(y**2) < 1e-4:
+            return np.zeros(50)
+        if len(y) < max_pad_length:
+            y = np.pad(y, (0, max_pad_length - len(y)), 'constant')
+        else:
+            y = y[:max_pad_length]
 
-    def __getitem__(self, idx):
-        filepath = self.filepaths[idx]
-        waveform, sr = torchaudio.load(filepath)
-        features = self.extract_features(waveform, sr)
-        label = torch.tensor(self.labels[idx])
-        return features, label
+        mfccs = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13).flatten()
+        chroma = librosa.feature.chroma_stft(y=y, sr=sr, tuning=None, norm=None).flatten()
+        mel = librosa.feature.melspectrogram(y=y, sr=sr).flatten()
+        contrast = librosa.feature.spectral_contrast(y=y, sr=sr).flatten()
 
-class CNNEmotionClassifier(nn.Module):
-    def __init__(self, num_classes):
-        super().__init__()
-        self.cnn = nn.Sequential(
-            nn.Conv2d(1, 16, kernel_size=3, padding=1), nn.ReLU(), nn.MaxPool2d(2),
-            nn.Conv2d(16, 32, kernel_size=3, padding=1), nn.ReLU(), nn.MaxPool2d(2)
-        )
-        self.fc = nn.Sequential(
-            nn.Flatten(),
-            nn.Linear(32 * 1 * 50, 128),
-            nn.ReLU(),
-            nn.Linear(128, num_classes)
-        )
+        return np.hstack([mfccs, chroma, mel, contrast])
+    except Exception as e:
+        print(f"Error processing {file_path}: {e}")
+        return np.zeros(50)
 
-    def forward(self, x):
-        x = x.unsqueeze(1)
-        return self.fc(self.cnn(x))
+# Load data
+X, y_emotion, y_intensity = [], [], []
+for folder in os.listdir(AUDIO_PATH):
+    folder_path = os.path.join(AUDIO_PATH, folder)
+    if os.path.isdir(folder_path):
+        for file in os.listdir(folder_path):
+            if file.endswith(".wav"):
+                parts = file.split("-")
+                emotion_code, intensity_code = parts[2], parts[3]
+                if emotion_code in emotion_mapping and intensity_code in intensity_mapping:
+                    file_path = os.path.join(folder_path, file)
+                    features = extract_features(file_path)
+                    X.append(features)
+                    y_emotion.append(emotion_category[emotion_mapping[emotion_code]])
+                    y_intensity.append(intensity_mapping[intensity_code])
 
-# Load audio dataset (RAVDESS)
-all_files, all_labels = [], []
-for root, _, files in os.walk("data/audio_data/ravdess"):
-    for file in files:
-        if file.endswith(".wav"):
-            emotion_id = file.split("-")[2]
-            if emotion_id in LABELS:
-                all_files.append(os.path.join(root, file))
-                all_labels.append(int(emotion_id) - 1)
+X = np.array(X)
 
-X_train, X_val, y_train, y_val = train_test_split(all_files, all_labels, test_size=0.1)
-train_loader = DataLoader(AudioFeatureDataset(X_train, y_train), batch_size=BATCH_SIZE, shuffle=True)
+# Preprocessing
+scaler = StandardScaler()
+X_scaled = scaler.fit_transform(X)
+pca = PCA(n_components=0.95)
+X_pca = pca.fit_transform(X_scaled)
 
-model = CNNEmotionClassifier(num_classes=8).to(DEVICE)
-criterion = nn.CrossEntropyLoss()
-optimizer = torch.optim.Adam(model.parameters(), lr=LR)
+# Encode labels
+le_emotion = LabelEncoder()
+le_intensity = LabelEncoder()
+y_emotion_encoded = le_emotion.fit_transform(y_emotion)
+y_intensity_encoded = le_intensity.fit_transform(y_intensity)
 
-for epoch in range(EPOCHS):
-    model.train()
-    total_loss = 0
-    for features, labels in tqdm(train_loader):
-        features, labels = features.to(DEVICE), labels.to(DEVICE)
-        outputs = model(features)
-        loss = criterion(outputs, labels)
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-        total_loss += loss.item()
-    print(f"Epoch {epoch+1}, Loss: {total_loss / len(train_loader):.4f}")
+# Train-test split
+X_train_e, X_test_e, y_train_e, y_test_e = train_test_split(X_pca, y_emotion_encoded, test_size=0.2, random_state=42)
+X_train_i, X_test_i, y_train_i, y_test_i = train_test_split(X_pca, y_intensity_encoded, test_size=0.2, random_state=42)
 
-torch.save(model.state_dict(), "checkpoints/audio_model.pt")
+# Model training with MLP
+model_emotion = MLPClassifier(hidden_layer_sizes=(128, 64), activation='relu', solver='adam', max_iter=500, random_state=42)
+model_emotion.fit(X_train_e, y_train_e)
 
+model_intensity = MLPClassifier(hidden_layer_sizes=(128, 64), activation='relu', solver='adam', max_iter=500, random_state=42)
+model_intensity.fit(X_train_i, y_train_i)
+
+# Model evaluation
+print("Emotion Classification Report:")
+y_pred_e = model_emotion.predict(X_test_e)
+print(classification_report(y_test_e, y_pred_e, target_names=le_emotion.classes_, zero_division=0))
+
+print("Intensity Classification Report:")
+y_pred_i = model_intensity.predict(X_test_i)
+print(classification_report(y_test_i, y_pred_i, target_names=le_intensity.classes_, zero_division=0))
+
+# Plot confusion matrices
+def plot_confusion_matrix(y_true, y_pred, labels, title, filename):
+    cm = confusion_matrix(y_true, y_pred)
+    df_cm = pd.DataFrame(cm, index=labels, columns=labels)
+    plt.figure(figsize=(6, 5))
+    sns.heatmap(df_cm, annot=True, fmt='d', cmap='Blues')
+    plt.xlabel("Predicted")
+    plt.ylabel("Actual")
+    plt.title(title)
+    plt.savefig(filename)
+    plt.close()
+
+plot_confusion_matrix(y_test_e, y_pred_e, le_emotion.classes_, "Emotion Classification Confusion Matrix", "confusion_matrix_emotion.png")
+plot_confusion_matrix(y_test_i, y_pred_i, le_intensity.classes_, "Intensity Classification Confusion Matrix", "confusion_matrix_intensity.png")
+
+# Save models using torch
+torch.save(model_emotion, os.path.join(MODEL_SAVE_PATH, "Emotion_model.pth"))
+torch.save(model_intensity, os.path.join(MODEL_SAVE_PATH, "Intensity_model.pth"))
+
+print("MLP Models saved successfully.")
